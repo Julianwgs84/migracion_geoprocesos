@@ -1,92 +1,88 @@
 # -*- coding: utf-8 -*-
-"""
-Migrated and Refactored 
-Original Model: Model_CF_Norgas_QA_with_FactorTraffic
-
-Description:
-Finds the closest drivers to an order location based on travel time, 
-applying a traffic factor to adjust the total travel time.
-"""
 import arcpy
 import sys
 import traceback
 
-def get_traffic_factor(sde_workspace):
-    """
-    Replaces the 'GetFieldValue' utility from ModelBuilder.
-    Reads the traffic factor from the View_FactorTraffic view.
-    If the value is null or fails, defaults to 2.0 based on model configuration.
-    """
-    factor_view = fr"{sde_workspace}\norgasprod.dbo.View_FactorTraffic"
-    traffic_factor = 2.0 # Default/Null fallback defined in the model (Null Value: 2.0)
+
+def obtener_factor_trafico(sde_workspace):
+    factor_view   = fr"{sde_workspace}\norgasprod.dbo.View_FactorTraffic"
+    factor_trafico = 2.0
     try:
         with arcpy.da.SearchCursor(factor_view, ["Factor"]) as cursor:
             for row in cursor:
                 if row[0] is not None:
-                    traffic_factor = float(row[0])
+                    factor_trafico = float(row[0])
                 break
     except Exception as e:
-        arcpy.AddWarning(f"No se pudo leer FactorTraffic de la vista. Usando el valor por defecto 2.0. Error: {e}")
-        
-    return traffic_factor
+        arcpy.AddWarning(f"No se pudo leer FactorTraffic. Se utilizará el valor por defecto 2.0. Error: {e}")
+    return factor_trafico
 
-def find_closest_drivers(order_id, travel_time_limit, driver_id_param, out_facilities_layer):
-    """
-    Calculates closest facilities (Drivers) to an Incident (Order) considering traffic.
-    """
+
+def encontrar_conductores_cercanos(order_id, travel_time_limit, driver_id_param, out_facilities_layer):
     arcpy.env.overwriteOutput = True
-    
+
     # ==========================================
-    # 1. PATHS (Update these parameters as needed)
+    # 1. RUTAS Y FUENTES DE DATOS
     # ==========================================
-    sde_workspace = r"Database Connections\NorgasPROD.sde"
-    order_source = fr"{sde_workspace}\norgasprod.dbo.View_OrdersActiveForClosestFacilities"
-    drivers_source = fr"{sde_workspace}\norgasprod.dbo.View_DriversAvalaibleForClosestFacilities"
+
+    # --- Opción A: Rutas estáticas para pruebas locales (activa por defecto) ---
+    sde_workspace   = r"Database Connections\NorgasPROD.sde"
+    order_source    = fr"{sde_workspace}\norgasprod.dbo.View_OrdersActiveForClosestFacilities"
+    drivers_source  = fr"{sde_workspace}\norgasprod.dbo.View_DriversAvalaibleForClosestFacilities"
     colombia_streets_nd = r"C:\Users\Administrator\Desktop\IntelligisDocuments\NetworkDataset\Colombia.gdb\Colombia_Streets\Colombia_Streets_ND"
-    
+
+    # --- Opción B: Rutas desde Toolbox (descomentar al registrar como Script Tool) ---
+    # sde_workspace       = arcpy.GetParameterAsText(4)
+    # order_source        = arcpy.GetParameterAsText(5)
+    # drivers_source      = arcpy.GetParameterAsText(6)
+    # colombia_streets_nd = arcpy.GetParameterAsText(7)
+
+    # --- Opción C: Rutas por argumentos de línea de comandos (descomentar para sys.argv) ---
+    # sde_workspace       = sys.argv[5]
+    # order_source        = sys.argv[6]
+    # drivers_source      = sys.argv[7]
+    # colombia_streets_nd = sys.argv[8]
+
     try:
-        arcpy.AddMessage("Iniciando proceso de Closest Facility...")
-        
+        arcpy.AddMessage("Iniciando análisis Closest Facility con factor de tráfico...")
+
         # ==========================================
-        # 2. RESOLVE VARIABLES & FILTERS
+        # 2. VARIABLES Y FILTROS
         # ==========================================
-        type_driver_id = 1 
-        
+        type_driver_id = 1
+
         if int(driver_id_param) == 0:
             filter_driver = "UserId <> 0"
         else:
             filter_driver = f"UserId = {driver_id_param}"
-            
+
         driver_where_clause = f"TypeDriverId IN (1, {type_driver_id}) AND {filter_driver}"
-        order_where_clause = f"ItineraryDetailsId = {order_id}"
-        
-        # Obtenemos el factor de tráfico manejando el Null (2.0)
-        traffic_factor = get_traffic_factor(sde_workspace)
-        arcpy.AddMessage(f"Factor de tráfico aplicado: {traffic_factor}")
+        order_where_clause  = f"ItineraryDetailsId = {order_id}"
+
+        factor_trafico = obtener_factor_trafico(sde_workspace)
+        arcpy.AddMessage(f"Factor de tráfico aplicado: {factor_trafico}")
 
         # ==========================================
-        # 3. PREPARE LAYERS
+        # 3. PREPARACIÓN DE CAPAS
         # ==========================================
-        arcpy.AddMessage("Creando Feature Layers de Órdenes y Conductores...")
-        order_layer = "Order_Filtered"
+        arcpy.AddMessage("Generando capas de órdenes y conductores...")
+        order_layer  = "Order_Filtered"
         driver_layer = "Driver_Filtered"
-        
+
         arcpy.management.MakeFeatureLayer(order_source, order_layer, order_where_clause)
         arcpy.management.MakeFeatureLayer(drivers_source, driver_layer, driver_where_clause)
-        
+
         if int(arcpy.management.GetCount(order_layer)[0]) == 0:
             arcpy.AddWarning(f"No se encontraron órdenes activas con el ID {order_id}.")
             return
-            
         if int(arcpy.management.GetCount(driver_layer)[0]) == 0:
             arcpy.AddWarning("No se encontraron conductores disponibles con los filtros aplicados.")
             return
 
         # ==========================================
-        # 4. NETWORK ANALYSIS (CLOSEST FACILITY)
+        # 4. CONFIGURACIÓN DE CAPA CLOSEST FACILITY
         # ==========================================
-        arcpy.AddMessage("Configurando capa de Closest Facility...")
-        
+        arcpy.AddMessage("Configurando capa de análisis de red...")
         cf_layer_name = "Closest_Facility_Layer"
         cf_result = arcpy.na.MakeClosestFacilityLayer(
             in_network_dataset=colombia_streets_nd,
@@ -97,12 +93,11 @@ def find_closest_drivers(order_id, travel_time_limit, driver_id_param, out_facil
             accumulate_attribute_name=["Kilometers", "TravelTime"]
         )
         cf_layer = cf_result[0]
-        
-        # Extraer nombres de las subcapas
+
         sub_layer_names = arcpy.na.GetNAClassNames(cf_layer)
-        incidents_name = sub_layer_names["Incidents"]
+        incidents_name  = sub_layer_names["Incidents"]
         facilities_name = sub_layer_names["Facilities"]
-        routes_name = sub_layer_names["CFRoutes"]
+        routes_name     = sub_layer_names["CFRoutes"]
 
         arcpy.na.AddLocations(
             in_network_analysis_layer=cf_layer,
@@ -112,7 +107,7 @@ def find_closest_drivers(order_id, travel_time_limit, driver_id_param, out_facil
             search_tolerance="5000 Meters",
             append="CLEAR"
         )
-        
+
         arcpy.na.AddLocations(
             in_network_analysis_layer=cf_layer,
             sub_layer=facilities_name,
@@ -122,7 +117,10 @@ def find_closest_drivers(order_id, travel_time_limit, driver_id_param, out_facil
             append="CLEAR"
         )
 
-        arcpy.AddMessage("Resolviendo rutas...")
+        # ==========================================
+        # 5. RESOLUCIÓN DE RUTAS
+        # ==========================================
+        arcpy.AddMessage("Resolviendo rutas de menor tiempo...")
         arcpy.na.Solve(
             in_network_analysis_layer=cf_layer,
             ignore_invalids="SKIP",
@@ -131,59 +129,67 @@ def find_closest_drivers(order_id, travel_time_limit, driver_id_param, out_facil
         )
 
         # ==========================================
-        # 5. EXTRACT RESULTS & CALCULATE TRAFFIC
+        # 6. RESULTADOS Y AJUSTE POR TRÁFICO
         # ==========================================
-        arcpy.AddMessage("Procesando resultados y sumando penalización de tráfico...")
-        
-        # En ArcPy, el equivalente a "Select Data" es listar y extraer las subcapas
+        arcpy.AddMessage("Calculando tiempos ajustados por factor de tráfico...")
         if arcpy.GetInstallInfo()['ProductName'] == 'Desktop':
-            routes_sublayer = arcpy.mapping.ListLayers(cf_layer, routes_name)[0]
+            routes_sublayer     = arcpy.mapping.ListLayers(cf_layer, routes_name)[0]
             facilities_sublayer = arcpy.mapping.ListLayers(cf_layer, facilities_name)[0]
-        else: # ArcGIS Pro
-            routes_sublayer = cf_layer.listLayers(routes_name)[0]
+        else:
+            routes_sublayer     = cf_layer.listLayers(routes_name)[0]
             facilities_sublayer = cf_layer.listLayers(facilities_name)[0]
-        
-        # Calcular nuevo TravelTime multiplicando por el factor de tráfico
+
         expression_type = "PYTHON3" if arcpy.GetInstallInfo()['ProductName'] != 'Desktop' else "PYTHON_9.3"
         arcpy.management.CalculateField(
             in_table=routes_sublayer,
             field="Total_TravelTime",
-            expression=f"!Total_TravelTime! * {traffic_factor}",
+            expression=f"!Total_TravelTime! * {factor_trafico}",
             expression_type=expression_type
         )
-        
-        # Unir Rutas con Facilities
+
         arcpy.management.AddJoin(
             in_layer_or_view=facilities_sublayer,
             in_field="ObjectID",
             join_table=routes_sublayer,
             join_field="FacilityID"
         )
-        
-        # Aplicar el filtro final de tiempo máximo
-        final_where = f"({routes_name}.Total_TravelTime / {traffic_factor}) <= {travel_time_limit}"
+
+        final_where = f"({routes_name}.Total_TravelTime / {factor_trafico}) <= {travel_time_limit}"
         arcpy.management.MakeFeatureLayer(
             in_features=facilities_sublayer,
             out_layer=out_facilities_layer,
             where_clause=final_where
         )
-        
-        arcpy.AddMessage(f"Proceso finalizado. Conductores viables exportados a: {out_facilities_layer}")
+
+        arcpy.AddMessage(f"Proceso Closest Facility finalizado. Conductores viables en: {out_facilities_layer}")
         return True
 
     except arcpy.ExecuteError:
         arcpy.AddError(arcpy.GetMessages(2))
         return False
     except Exception as e:
-        arcpy.AddError(f"Error inesperado: {str(e)}")
+        arcpy.AddError(f"Error de sistema inesperado: {str(e)}")
         arcpy.AddError(traceback.format_exc())
         return False
 
+
 if __name__ == '__main__':
-    # Configuración de parámetros para la herramienta Script de ArcMap/ArcGIS Pro
-    param_order_id = arcpy.GetParameterAsText(0) if arcpy.GetParameterAsText(0) else "26611"
-    param_travel_time = arcpy.GetParameterAsText(1) if arcpy.GetParameterAsText(1) else "30"
-    param_driver_id = arcpy.GetParameterAsText(2) if arcpy.GetParameterAsText(2) else "0"
-    out_layer = arcpy.GetParameterAsText(3) if arcpy.GetParameterAsText(3) else "CF_Facilities"
-    
-    find_closest_drivers(param_order_id, param_travel_time, param_driver_id, out_layer)
+    # --- Opción A: Valores estáticos para pruebas locales (activa por defecto) ---
+    p_order_id         = "26611"
+    p_travel_time      = "30"
+    p_driver_id        = "0"
+    p_out_layer        = "CF_Facilities"
+
+    # --- Opción B: Parámetros desde Toolbox (descomentar al registrar como Script Tool) ---
+    # p_order_id    = arcpy.GetParameterAsText(0)
+    # p_travel_time = arcpy.GetParameterAsText(1)
+    # p_driver_id   = arcpy.GetParameterAsText(2)
+    # p_out_layer   = arcpy.GetParameterAsText(3)
+
+    # --- Opción C: Parámetros por línea de comandos (descomentar para sys.argv) ---
+    # p_order_id    = sys.argv[1]
+    # p_travel_time = sys.argv[2]
+    # p_driver_id   = sys.argv[3]
+    # p_out_layer   = sys.argv[4]
+
+    encontrar_conductores_cercanos(p_order_id, p_travel_time, p_driver_id, p_out_layer)

@@ -3,124 +3,93 @@ import arcpy
 import sys
 import traceback
 
-# Script refactorizado para el cálculo de ETA (Estimated Time of Arrival)
-# Se adaptaron las rutas al entorno local y se implementó la iteración no exportada por ModelBuilder
 
-def procesar_rutas_eta():
-    # Se habilita la sobreescritura de salidas para prevenir bloqueos de esquema
+def calcular_rutas_eta_prod(view_points_for_eta, nr_stops_target, colombia_streets_nd):
     arcpy.env.overwriteOutput = True
-    
-    # ==========================================
-    # 1. RUTAS LOCALES PARA PRUEBAS
-    # ==========================================
-    # Referencia a la File Geodatabase local
-    ruta_raiz = r"D:\Geoprocesos\Geoprocesos_ArcGIS_Pro\Geoprocesos_ArcGIS_Pro.gdb"
-    
-    view_points_for_eta = fr"{ruta_raiz}\View_NA_PointStopsForETA"
-    nr_stops_target = fr"{ruta_raiz}\NR_STOPS"
-    
-    # Referencia local al dataset de red
-    colombia_streets_nd = r"D:\Geoprocesos\Geoprocesos_ArcGIS_Pro\NetworkDataset\Colombia.gdb\Colombia_Streets\Colombia_Streets_ND"
-    
+
     try:
-        arcpy.AddMessage("Iniciando ejecución del geoproceso de cálculo de ETA...")
-        
+        arcpy.AddMessage("Iniciando cálculo de ETA...")
+
         # ==========================================
-        # 2. REEMPLAZO DEL ITERADOR DE MODEL BUILDER
+        # 1. EXTRACCIÓN DE RUTAS ÚNICAS
         # ==========================================
-        # Se obtiene una lista de rutas únicas de forma programática mediante cursor
-        iterator_field = "Name" 
+        iterator_field = "Name"
         valores_unicos = set()
-        
-        arcpy.AddMessage(f"Extrayendo valores únicos mediante el campo: {iterator_field}...")
+
+        arcpy.AddMessage(f"Extrayendo valores únicos por el campo: {iterator_field}...")
         with arcpy.da.SearchCursor(view_points_for_eta, [iterator_field]) as cursor:
             for row in cursor:
                 if row[0]:
                     valores_unicos.add(row[0])
-                    
+
         if not valores_unicos:
-            arcpy.AddWarning("La vista de paradas no retornó información para procesar el ETA.")
+            arcpy.AddWarning("La vista de paradas no retornó información para procesar.")
             return False
 
         arcpy.AddMessage(f"Se identificaron {len(valores_unicos)} rutas a evaluar.")
 
         # ==========================================
-        # 3. CICLO DE ANÁLISIS DE RUTAS (ETA)
+        # 2. CICLO DE ANÁLISIS DE RUTAS
         # ==========================================
         for valor_actual in valores_unicos:
-            arcpy.AddMessage(f"\nProcesando análisis para la ruta: {valor_actual}")
-            
-            # Se aplica filtro individual de puntos correspondientes a la ruta en curso
+            arcpy.AddMessage(f"Procesando análisis para la ruta: {valor_actual}")
+
             filtered_layer = "Puntos_Filtrados"
             if isinstance(valor_actual, str):
                 where_clause = f"{iterator_field} = '{valor_actual}'"
             else:
                 where_clause = f"{iterator_field} = {valor_actual}"
-                
-            arcpy.management.MakeFeatureLayer(view_points_for_eta, filtered_layer, where_clause)
-            
-            # Se inicializa la capa de Route Analysis
-            route_layer_name = f"Route_ETA_{valor_actual}"
-            route_result = arcpy.na.MakeRouteLayer(
-                in_network_dataset=colombia_streets_nd,
-                out_network_analysis_layer=route_layer_name,
-                impedance_attribute="TravelTime",
-                find_best_order="FIND_BEST_ORDER",
-                ordering_type="PRESERVE_FIRST",
-                accumulate_attribute_name=["Kilometers", "TravelTime"],
-                UTurn_policy="ALLOW_DEAD_ENDS_ONLY",
-                hierarchy="USE_HIERARCHY"
-            )
-            route_layer = route_result[0]
-            
-            # Se identifica la subcapa de paradas (Stops)
-            sub_layer_names = arcpy.na.GetNAClassNames(route_layer)
-            stops_sublayer_name = sub_layer_names["Stops"]
-            
-            # Se integran las paradas filtradas a la capa de red
-            arcpy.na.AddLocations(
-                in_network_analysis_layer=route_layer,
-                sub_layer=stops_sublayer_name,
-                in_table=filtered_layer,
-                field_mappings="Name Name #;RouteName RouteName #;TimeWindowStart TimeWindowStart #;TimeWindowEnd TimeWindowEnd #;CurbApproach CurbApproach 0;Attr_Length Attr_Length 0;LocationType LocationType 0;Attr_Travel_Time Attr_Travel_Time 0",
-                search_tolerance="5000 Meters",
-                append="CLEAR"
-            )
-            
-            # Ejecución del solver de ruta
+
+            arcpy.management.MakeTableView(view_points_for_eta, filtered_layer, where_clause)
+
+            route_layer_name = f"Route_{valor_actual}"
+
             try:
-                arcpy.AddMessage(f"  Resolviendo geometría de red para: {valor_actual}...")
+                route_layer_obj = arcpy.na.MakeRouteLayer(
+                    in_network_dataset=colombia_streets_nd,
+                    out_network_analysis_layer=route_layer_name,
+                    impedance_attribute="TravelTime",
+                    find_best_order="FIND_BEST_ORDER",
+                    ordering_type="PRESERVE_FIRST",
+                    accumulate_attribute_name=["Kilometers", "TravelTime"],
+                    UTurn_policy="ALLOW_DEAD_ENDS_ONLY",
+                    hierarchy="USE_HIERARCHY"
+                )[0]
+
+                arcpy.na.AddLocations(
+                    in_network_analysis_layer=route_layer_obj,
+                    sub_layer="Stops",
+                    in_table=filtered_layer,
+                    field_mappings="Name Name #;RouteName RouteName #",
+                    search_tolerance="5000 Meters",
+                    append="CLEAR"
+                )
+
                 arcpy.na.Solve(
-                    in_network_analysis_layer=route_layer,
+                    in_network_analysis_layer=route_layer_obj,
                     ignore_invalids="SKIP",
                     terminate_on_solve_error="CONTINUE"
                 )
+
+                if arcpy.GetInstallInfo()["ProductName"] == "Desktop":
+                    stops_layer = arcpy.mapping.ListLayers(route_layer_obj, "Stops")[0]
+                else:
+                    stops_layer = route_layer_obj.listLayers("Stops")[0]
+
+                arcpy.management.Append(
+                    inputs=stops_layer,
+                    target=nr_stops_target,
+                    schema_type="NO_TEST"
+                )
+
+                arcpy.AddMessage(f"Ruta {valor_actual} consolidada correctamente.")
+
             except arcpy.ExecuteError:
-                # Se registra la falla de enrutamiento y se continúa con el siguiente grupo para evitar interrupción total
-                arcpy.AddWarning(f"  Fallo durante la resolución de ruta {valor_actual}: {arcpy.GetMessages(2)}")
-                continue
+                arcpy.AddWarning(f"Error al procesar la ruta {valor_actual}: {arcpy.GetMessages(2)}")
+            except Exception as e:
+                arcpy.AddWarning(f"Error inesperado en la ruta {valor_actual}: {str(e)}")
 
-            # ==========================================
-            # 4. EXTRACCIÓN Y CONSOLIDACIÓN DE RESULTADOS
-            # ==========================================
-            if arcpy.GetInstallInfo()['ProductName'] == 'Desktop':
-                stops_sublayer = arcpy.mapping.ListLayers(route_layer, stops_sublayer_name)[0]
-            else: # Entorno ArcGIS Pro
-                stops_sublayer = route_layer.listLayers(stops_sublayer_name)[0]
-            
-            arcpy.AddMessage(f"  Anexando resultados calculados en tabla NR_STOPS...")
-            arcpy.management.Append(
-                inputs=[stops_sublayer],
-                target=nr_stops_target,
-                schema_type="TEST",
-                subtype="1297"
-            )
-            
-            # Se elimina la referencia a capas temporales para liberar memoria RAM en cada iteración
-            arcpy.management.Delete(filtered_layer)
-            arcpy.management.Delete(route_layer)
-
-        arcpy.AddMessage("\nProceso de ETA finalizado exitosamente.")
+        arcpy.AddMessage("Proceso de cálculo ETA finalizado para todas las rutas.")
         return True
 
     except arcpy.ExecuteError:
@@ -131,5 +100,22 @@ def procesar_rutas_eta():
         arcpy.AddError(traceback.format_exc())
         return False
 
+
 if __name__ == '__main__':
-    procesar_rutas_eta()
+    # --- Opción A: Rutas estáticas para pruebas locales (activa por defecto) ---
+    ruta_raiz = r"D:\Geoprocesos\Geoprocesos_ArcGIS_Pro\Geoprocesos_ArcGIS_Pro.gdb"
+    p_view_points  = fr"{ruta_raiz}\View_NA_PointStopsForETA"
+    p_stops_target = fr"{ruta_raiz}\NR_STOPS"
+    p_nd           = r"D:\Geoprocesos\Geoprocesos_ArcGIS_Pro\NetworkDataset\Colombia.gdb\Colombia_Streets\Colombia_Streets_ND"
+
+    # --- Opción B: Parámetros desde Toolbox (descomentar al registrar como Script Tool) ---
+    # p_view_points  = arcpy.GetParameterAsText(0)
+    # p_stops_target = arcpy.GetParameterAsText(1)
+    # p_nd           = arcpy.GetParameterAsText(2)
+
+    # --- Opción C: Parámetros por línea de comandos (descomentar para sys.argv) ---
+    # p_view_points  = sys.argv[1]
+    # p_stops_target = sys.argv[2]
+    # p_nd           = sys.argv[3]
+
+    calcular_rutas_eta_prod(p_view_points, p_stops_target, p_nd)
